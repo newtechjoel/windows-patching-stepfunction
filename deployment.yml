@@ -1,0 +1,778 @@
+## Patches instances via SSM automation, identifies instance via instancedata tag
+## Will sequentially patch instances based on instance role, "data" database and file servers first, "other" application servers last. Splits patching order into A/B datacenters.
+## https://github.com/newtechjoel
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Create Patching StepFunction and associated LambdaFunction and SSM resources in account 
+Parameters: 
+  contactToEmail:
+    Description: "Email Address to send Patching notifications to."
+    Type: String
+  contactFromEmail:
+    Description: "Email Address to send Patching notifications from."
+    Type: String
+  PythonFilesS3Bucket:
+    Description: "S3 Bucket where Python lambda functions zips (ssm_automation, ssm_retry etc) are located, place them in the root of the bucket"
+    Type: String
+Resources: 
+  ssmPatchingFunction:
+    DependsOn: 
+      - stepFunctionsSNSTopic
+      - lambdaPatchingRole
+    Type : AWS::Lambda::Function
+    Properties : 
+      Description : Lamba Function that initiates the patching SSM Automations
+      Code : 
+        S3Bucket : !Ref "PythonFilesS3Bucket"
+        S3Key : "ssm_patchautomation.zip"
+      DeadLetterConfig : 
+        TargetArn: !Ref "stepFunctionsSNSTopic"
+      FunctionName : ssm_patchautomation
+      Handler : ssm_patchautomation.lambda_handler
+      MemorySize : 128
+      Role : !GetAtt [ lambdaPatchingRole, Arn ]
+      Runtime : python3.6
+      Timeout : 300
+
+  ssmPollingFunction:      
+    DependsOn: 
+      - stepFunctionsSNSTopic
+      - lambdaPatchingRole
+    Type : AWS::Lambda::Function
+    Properties : 
+      Description : Lamba Function that polls the status of patching SSM Automations
+      Code : 
+        S3Bucket : !Ref "PythonFilesS3Bucket"
+        S3Key : "ssm_patchpolling.zip"
+      DeadLetterConfig : 
+        TargetArn: !Ref "stepFunctionsSNSTopic"
+      FunctionName : ssm_patchpolling
+      Handler : ssm_patchpolling.lambda_handler
+      MemorySize : 128
+      Role : !GetAtt [ lambdaPatchingRole, Arn ]
+      Runtime : python3.6
+      Timeout : 300
+
+  ssmNotificationFunction:      
+    DependsOn: 
+      - stepFunctionsSNSTopic
+      - lambdaPatchingRole
+    Type : AWS::Lambda::Function
+    Properties : 
+      Description : Lamba Function that sends email notifications
+      Code : 
+        S3Bucket : !Ref "PythonFilesS3Bucket"
+        S3Key : "ssm_patchingnotifications.zip"
+      DeadLetterConfig : 
+        TargetArn: !Ref "stepFunctionsSNSTopic"
+      FunctionName : ssm_patchingnotifications
+      Handler : ssm_patchingnotifications.lambda_handler
+      Environment :
+        Variables : 
+          contactToEmail: !Ref "contactToEmail"
+          contactFromEmail: !Ref "contactFromEmail"
+      MemorySize : 128
+      Role : !GetAtt [ lambdaPatchingRole, Arn ]
+      Runtime : python3.6
+      Timeout : 300
+
+  ssmRetryFunction:      
+    DependsOn: 
+      - stepFunctionsSNSTopic
+      - lambdaPatchingRole
+    Type : AWS::Lambda::Function
+    Properties : 
+      Description : Lamba Function retries failed automations
+      Code : 
+        S3Bucket : !Ref "PythonFilesS3Bucket"
+        S3Key : "ssm_retry.zip"
+      DeadLetterConfig : 
+        TargetArn: !Ref "stepFunctionsSNSTopic"
+      FunctionName : ssm_retry 
+      Handler : ssm_retry.lambda_handler
+      Environment :
+        Variables : 
+          contactToEmail: !Ref "contactToEmail"
+          contactFromEmail: !Ref "contactFromEmail"
+      MemorySize : 128
+      Role : !GetAtt [ lambdaPatchingRole, Arn ]
+      Runtime : python3.6
+      Timeout : 300
+    
+  patchingStepFunction:
+    DependsOn: 
+      - stepFunctionsSNSTopic
+      - ssmPollingFunction
+      - ssmPatchingFunction
+      - ssmNotificationFunction
+      - ssmRetryFunction
+    Type: AWS::StepFunctions::StateMachine
+    Properties: 
+      StateMachineName : patchingStepFunction
+      DefinitionString:
+        Fn::Sub:
+        - |-
+            {
+            "Comment": "Data and Application Instance Patching",
+            "StartAt": "Data_AZ_A",
+            "States": {
+              "Job_Failed": {
+                "Type": "Fail",
+                "Cause": "Patching step function FAILED",
+                "Error": "Patching step function FAILED"
+              },
+              "Data_AZ_A": {
+                "Type": "Task",
+                "Resource": "${ssmPatchingArn}",
+                "ResultPath": "$",
+                "Retry": [ {
+                    "ErrorEquals": [ "Lambda.ServiceException", "Lambda.SdkClientException", "States.TaskFailed"],
+                    "IntervalSeconds": 5,
+                    "MaxAttempts": 3,
+                    "BackoffRate": 2
+                } ],
+                "Next": "Get_Status_Data_AZ_A"
+              },
+              "Get_Status_Data_AZ_A": {
+                "Type": "Task",
+                "Resource": "${ssmPollingArn}",
+                "InputPath": "$",
+                "Next": "Confirm_Data_AZ_A",
+                "Retry": [ {
+                    "ErrorEquals": [ "Lambda.ServiceException", "Lambda.SdkClientException", "States.TaskFailed"],
+                    "IntervalSeconds": 5,
+                    "MaxAttempts": 3,
+                    "BackoffRate": 2
+                } ],
+                "ResultPath": "$"
+              },
+              "Failure_Notification": {
+                "Type": "Task",
+                "Resource": "${ssmNotificationArn}",
+                "InputPath": "$",
+                "Retry": [ {
+                    "ErrorEquals": [ "Lambda.ServiceException", "Lambda.SdkClientException", "States.TaskFailed"],
+                    "IntervalSeconds": 5,
+                    "MaxAttempts": 3,
+                    "BackoffRate": 2
+                } ],
+                "Next": "Job_Failed",
+                "ResultPath": "$"
+              },
+              "Wait_3m_Data_A": {
+                "Type": "Wait",
+                "Seconds": 180,
+                "Next": "Get_Status_Data_AZ_A"
+              },
+              "Retry_Automation_DATA_A": {
+                "Type": "Task",
+                "Resource": "${ssmRetryArn}",
+                "InputPath": "$",
+                "Retry": [ {
+                    "ErrorEquals": [ "Lambda.ServiceException", "Lambda.SdkClientException", "States.TaskFailed"],
+                    "IntervalSeconds": 5,
+                    "MaxAttempts": 3,
+                    "BackoffRate": 2
+                } ],
+                "Next": "Get_Status_Data_AZ_A",
+                "ResultPath": "$"
+              },
+              "Confirm_Data_AZ_A": {
+              "Type": "Choice",
+              "Choices": [
+                {
+                  "And": [
+                    {
+                      "Variable": "$.patchinginfo.status",
+                      "StringEquals": "FAILED"
+                    },
+                    {
+                      "Variable": "$.patchinginfo.retryCounter",
+                      "NumericLessThan": 4
+                    }
+                  ],
+                  "Next": "Retry_Automation_DATA_A"
+                },
+                {
+                  "And": [
+                    {
+                      "Variable": "$.patchinginfo.status",
+                      "StringEquals": "FAILED"
+                    },
+                    {
+                      "Variable": "$.patchinginfo.retryCounter",
+                      "NumericGreaterThanEquals": 4
+                    }
+                  ],
+                  "Next": "Failure_Notification"
+                },
+                {
+                  "Variable": "$.patchinginfo.status",
+                  "StringEquals": "WAITING",
+                  "Next": "Wait_3m_Data_A"
+                },
+                {
+                  "Variable": "$.patchinginfo.status",
+                  "StringEquals": "SUCCEEDED",
+                  "Next": "Data_AZ_B"
+                }
+              ],
+              "Default": "Wait_3m_Data_A"
+            },
+            "Data_AZ_B": {
+              "Type": "Task",
+              "InputPath": "$",
+              "Resource": "${ssmPatchingArn}",
+              "ResultPath": "$",
+              "Retry": [ {
+                "ErrorEquals": [ "Lambda.ServiceException", "Lambda.SdkClientException", "States.TaskFailed"],
+                "IntervalSeconds": 5,
+                "MaxAttempts": 3,
+                "BackoffRate": 2
+            } ],
+              "Next": "Get_Status_Data_AZ_B"
+            },
+            "Get_Status_Data_AZ_B": {
+              "Type": "Task",
+              "Resource": "${ssmPollingArn}",
+              "InputPath": "$",
+              "Retry": [ {
+                "ErrorEquals": [ "Lambda.ServiceException", "Lambda.SdkClientException", "States.TaskFailed"],
+                "IntervalSeconds": 5,
+                "MaxAttempts": 3,
+                "BackoffRate": 2
+            } ],
+              "Next": "Confirm_Data_AZ_B",
+              "ResultPath": "$"
+            },
+            "Wait_3m_Data_B": {
+              "Type": "Wait",
+              "Seconds": 180,
+              "Next": "Get_Status_Data_AZ_B"
+            },
+            "Retry_Automation_DATA_B": {
+                "Type": "Task",
+                "Resource": "${ssmRetryArn}",
+                "InputPath": "$",
+                "Retry": [ {
+                    "ErrorEquals": [ "Lambda.ServiceException", "Lambda.SdkClientException", "States.TaskFailed"],
+                    "IntervalSeconds": 5,
+                    "MaxAttempts": 3,
+                    "BackoffRate": 2
+                } ],
+                "Next": "Get_Status_Data_AZ_B",
+                "ResultPath": "$"
+              },
+            "Confirm_Data_AZ_B": {
+                "Type": "Choice",
+                "Choices": [
+                  {
+                    "And": [
+                      {
+                        "Variable": "$.patchinginfo.status",
+                        "StringEquals": "FAILED"
+                      },
+                      {
+                        "Variable": "$.patchinginfo.retryCounter",
+                        "NumericLessThan": 4
+                      }
+                    ],
+                    "Next": "Retry_Automation_DATA_B"
+                  },
+                  {
+                    "And": [
+                      {
+                        "Variable": "$.patchinginfo.status",
+                        "StringEquals": "FAILED"
+                      },
+                      {
+                        "Variable": "$.patchinginfo.retryCounter",
+                        "NumericGreaterThanEquals": 4
+                      }
+                    ],
+                    "Next": "Failure_Notification"
+                  },
+                  {
+                    "Variable": "$.patchinginfo.status",
+                    "StringEquals": "WAITING",
+                    "Next": "Wait_3m_Data_B"
+                  },
+                  {
+                    "Variable": "$.patchinginfo.status",
+                    "StringEquals": "SUCCEEDED",
+                    "Next": "Application_AZ_A"
+                  }
+                ],
+              "Default": "Wait_3m_Data_B"
+            },
+            "Application_AZ_A": {
+              "Type": "Task",
+              "InputPath": "$",
+              "Resource": "${ssmPatchingArn}",
+              "ResultPath": "$",
+              "Retry": [ {
+                "ErrorEquals": [ "Lambda.ServiceException", "Lambda.SdkClientException", "States.TaskFailed"],
+                "IntervalSeconds": 5,
+                "MaxAttempts": 3,
+                "BackoffRate": 2
+            } ],
+              "Next": "Get_Status_Application_AZ_A"
+            },
+            "Get_Status_Application_AZ_A": {
+              "Type": "Task",
+              "Resource": "${ssmPollingArn}",
+              "InputPath": "$",
+              "Retry": [ {
+                "ErrorEquals": [ "Lambda.ServiceException", "Lambda.SdkClientException", "States.TaskFailed"],
+                "IntervalSeconds": 5,
+                "MaxAttempts": 3,
+                "BackoffRate": 2
+            } ],
+              "Next": "Confirm_Application_AZ_A",
+              "ResultPath": "$"
+            },
+            "Wait_3m_Application_A": {
+              "Type": "Wait",
+              "Seconds": 180,
+              "Next": "Get_Status_Application_AZ_A"
+            },
+            "Retry_Automation_APPLICATION_A": {
+                "Type": "Task",
+                "Resource": "${ssmRetryArn}",
+                "InputPath": "$",
+                "Retry": [ {
+                    "ErrorEquals": [ "Lambda.ServiceException", "Lambda.SdkClientException", "States.TaskFailed"],
+                    "IntervalSeconds": 5,
+                    "MaxAttempts": 3,
+                    "BackoffRate": 2
+                } ],
+                "Next": "Get_Status_Application_AZ_A",
+                "ResultPath": "$"
+              },
+            "Confirm_Application_AZ_A": {
+                "Type": "Choice",
+                "Choices": [
+                  {
+                    "And": [
+                      {
+                        "Variable": "$.patchinginfo.status",
+                        "StringEquals": "FAILED"
+                      },
+                      {
+                        "Variable": "$.patchinginfo.retryCounter",
+                        "NumericLessThan": 4
+                      }
+                    ],
+                    "Next": "Retry_Automation_APPLICATION_A"
+                  },
+                  {
+                    "And": [
+                      {
+                        "Variable": "$.patchinginfo.status",
+                        "StringEquals": "FAILED"
+                      },
+                      {
+                        "Variable": "$.patchinginfo.retryCounter",
+                        "NumericGreaterThanEquals": 4
+                      }
+                    ],
+                    "Next": "Failure_Notification"
+                  },
+                  {
+                    "Variable": "$.patchinginfo.status",
+                    "StringEquals": "WAITING",
+                    "Next": "Wait_3m_Application_A"
+                  },
+                  {
+                    "Variable": "$.patchinginfo.status",
+                    "StringEquals": "SUCCEEDED",
+                    "Next": "Application_AZ_B"
+                  }
+                ],
+              "Default": "Wait_3m_Application_A"
+            },
+            "Application_AZ_B": {
+              "Type": "Task",
+              "InputPath": "$",
+              "Resource": "${ssmPatchingArn}",
+              "ResultPath": "$",
+              "Retry": [ {
+                "ErrorEquals": [ "Lambda.ServiceException", "Lambda.SdkClientException", "States.TaskFailed"],
+                "IntervalSeconds": 5,
+                "MaxAttempts": 3,
+                "BackoffRate": 2
+            } ],
+              "Next": "Get_Status_Application_AZ_B"
+            },
+            "Get_Status_Application_AZ_B": {
+              "Type": "Task",
+              "Resource": "${ssmPollingArn}",
+              "InputPath": "$",
+              "Retry": [ {
+                "ErrorEquals": [ "Lambda.ServiceException", "Lambda.SdkClientException", "States.TaskFailed"],
+                "IntervalSeconds": 5,
+                "MaxAttempts": 3,
+                "BackoffRate": 2
+            } ],
+              "Next": "Confirm_Application_AZ_B",
+              "ResultPath": "$"
+            },
+            "Wait_3m_Application_B": {
+              "Type": "Wait",
+              "Seconds": 180,
+              "Next": "Get_Status_Application_AZ_B"
+            },
+            "Retry_Automation_APPLICATION_B": {
+                "Type": "Task",
+                "Resource": "${ssmRetryArn}",
+                "InputPath": "$",
+                "Retry": [ {
+                    "ErrorEquals": [ "Lambda.ServiceException", "Lambda.SdkClientException", "States.TaskFailed"],
+                    "IntervalSeconds": 5,
+                    "MaxAttempts": 3,
+                    "BackoffRate": 2
+                } ],
+                "Next": "Get_Status_Application_AZ_B",
+                "ResultPath": "$"
+              },
+            "Confirm_Application_AZ_B": {
+                "Type": "Choice",
+                "Choices": [
+                  {
+                    "And": [
+                      {
+                        "Variable": "$.patchinginfo.status",
+                        "StringEquals": "FAILED"
+                      },
+                      {
+                        "Variable": "$.patchinginfo.retryCounter",
+                        "NumericLessThan": 4
+                      }
+                    ],
+                    "Next": "Retry_Automation_APPLICATION_B"
+                  },
+                  {
+                    "And": [
+                      {
+                        "Variable": "$.patchinginfo.status",
+                        "StringEquals": "FAILED"
+                      },
+                      {
+                        "Variable": "$.patchinginfo.retryCounter",
+                        "NumericGreaterThanEquals": 4
+                      }
+                    ],
+                    "Next": "Failure_Notification"
+                  },
+                  {
+                    "Variable": "$.patchinginfo.status",
+                    "StringEquals": "WAITING",
+                    "Next": "Wait_3m_Application_B"
+                  },
+                  {
+                    "Variable": "$.patchinginfo.status",
+                    "StringEquals": "SUCCEEDED",
+                    "Next": "Success_Notification"
+                  }
+                ],
+              "Default": "Wait_3m_Application_B"
+            },
+            "Success_Notification": {
+              "Type": "Task",
+              "Resource": "${ssmNotificationArn}",
+              "InputPath": "$",
+              "Next": "End Patching",
+              "Retry": [ {
+                "ErrorEquals": [ "Lambda.ServiceException", "Lambda.SdkClientException", "States.TaskFailed"],
+                "IntervalSeconds": 5,
+                "MaxAttempts": 3,
+                "BackoffRate": 2
+            } ],
+              "ResultPath": "$"
+            },
+            "End Patching": {
+              "Type": "Succeed"
+                }
+              }
+            }
+        - {
+            ssmPatchingArn: !GetAtt [ ssmPatchingFunction, Arn ],
+            ssmPollingArn: !GetAtt [ ssmPollingFunction, Arn ],
+            ssmNotificationArn: !GetAtt [ ssmNotificationFunction, Arn ],
+            ssmRetryArn: !GetAtt [ ssmRetryFunction, Arn ]
+        }
+      RoleArn : !GetAtt [ stepfunctionRole, Arn ]
+
+  stepfunctionRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+                - !Sub states.${AWS::Region}.amazonaws.com
+            Action: "sts:AssumeRole"
+      Path: "/"
+      Policies:
+        - PolicyName: StatesExecutionPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "lambda:InvokeFunction"
+                Resource: "*"
+
+  lambdaPatchingRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: 
+                - lambda.amazonaws.com
+                - ssm.amazonaws.com
+            Action: "sts:AssumeRole"
+      ManagedPolicyArns:
+      - "arn:aws:iam::aws:policy/AWSLambdaExecute"
+      - "arn:aws:iam::aws:policy/AmazonSSMFullAccess"
+      - "arn:aws:iam::aws:policy/service-role/AmazonSSMAutomationRole"
+      Path: "/"
+      Policies:
+      - PolicyName: "ssmPatchingAutomationIAMPolicy"
+        PolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+          - Effect: "Allow"
+            Action:
+            - "iam:PassRole"
+            - "iam:GetRole"
+            Resource:
+            - !GetAtt "ssmAutomationPatchingRole.Arn"
+      - PolicyName: "ssmPatchingAutomationGeneralPolicy"
+        PolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            -
+              Sid: AllowEC2Actions
+              Effect: Allow
+              Action:
+                - "ec2:DescribeInstances"
+                - "ec2:DescribeAvailabilityZones"
+                - "ec2:DescribeTags"
+                - "ec2:DescribeInstanceStatus"
+                - "ses:SendEmail"
+                - "ses:ListIdentities"
+                - "ses:VerifyEmailIdentity"
+              Resource: "*"
+            -
+              Sid: AllowSNSActions
+              Effect: "Allow"
+              Action:
+                - "sns:Publish"
+              Resource: !Ref "stepFunctionsSNSTopic"
+            -
+              Sid: AllowLogActions
+              Effect: "Allow"
+              Action:
+                - "logs:CreateLogGroup"
+                - "logs:CreateLogStream"
+                - "logs:DescribeLogGroups"
+                - "logs:DescribeLogStreams"
+                - "logs:PutLogEvents"
+              Resource: "*"
+
+  ssmAutomationPatchingRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: 
+                - lambda.amazonaws.com
+                - ssm.amazonaws.com
+            Action: "sts:AssumeRole"
+      ManagedPolicyArns: 
+        - "arn:aws:iam::aws:policy/service-role/AmazonSSMAutomationRole"
+
+  stepFunctionsSNSTopic:
+    Type: AWS::SNS::Topic
+    Properties: 
+      DisplayName: stepFunctionsSNSTopic
+      TopicName: stepFunctionsSNSTopic
+
+  stepFunctionsSNSTopicSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      Endpoint: !Ref 'contactToEmail'
+      Protocol: email
+      TopicArn: !Ref 'stepFunctionsSNSTopic'
+
+  ssmPatchingDocument: 
+    Type: "AWS::SSM::Document"
+    DependsOn:
+      - ssmAutomationPatchingRole
+    Properties:
+      Tags:
+        -
+          Key: "patchingDocument"
+          Value: "patchingDocument"
+      DocumentType: Automation
+      Content: 
+        schemaVersion: "0.3"
+        assumeRole: !GetAtt [ ssmAutomationPatchingRole, Arn ]
+        description: "Updates a Microsoft Windows AMI. By default it will install all Windows updates, Amazon software, and Amazon drivers. It will then sysprep and create anew AMI. Supports Windows Server 2008 R2 and greater."
+        parameters: 
+          AutomationAssumeRole: 
+            default: !GetAtt [ ssmAutomationPatchingRole, Arn ]
+            description: "(Required) The ARN of the role that allows Automation to perform the actions on your behalf."
+            type: String
+          Categories: 
+            default: ""
+            description: "(Optional) Specify one or more update categories. "
+            type: String
+          EnvironmentName: 
+            default: Production
+            description: "(Required) The environment name of the instance. Used for AMI name"
+            type: String
+          ExcludeKbs: 
+            default: ""
+            description: "(Optional) Specify one or more Microsoft Knowledge Base (KB) article IDs to exclude. You can exclude multiple IDs using comma-separated values. Valid formats: KB9876543 or 9876543."
+            type: String
+          IncludeKbs: 
+            default: ""
+            description: "(Optional) Specify one or more Microsoft Knowledge Base (KB) article IDs to include. You can install multiple IDs using comma-separated values. Valid formats: KB9876543 or 9876543."
+            type: String
+          InstanceId: 
+            default: i-080246d53da1b7a0f
+            description: "(Required) The ID of the instance"
+            type: String
+          PostUpdateScript: 
+            default: ""
+            description: "(Optional) A script provided as a string. It will execute after installing OS updates."
+            type: String
+          PreUpdateScript: 
+            default: ""
+            description: "(Optional) A script provided as a string. It will execute prior to installing OS updates."
+            type: String
+          PublishedDateAfter: 
+            default: ""
+            description: "(Optional) "
+            type: String
+          PublishedDateBefore: 
+            default: ""
+            description: "(Optional) "
+            type: String
+          PublishedDaysOld: 
+            default: ""
+            description: "(Optional) Specify the amount of days old the updates must be from"
+            type: String
+          SeverityLevels: 
+            default: ""
+            description: "(Optional) Or, you can specify a comma separated list: Critical,Important,Low."
+            type: String
+          SolutionName: 
+            default: tgb
+            description: "(Required) The solution name of the instance. Used for AMI name"
+            type: String
+          TargetAmiName: 
+            default: "{{SolutionName}}-{{EnvironmentName}}-{{Tier}}-{{InstanceId}}-Patching-{{global:DATE_TIME}}"
+            description: "(Optional) The name of the new AMI that will be created. Default is a system-generated string including the source AMI id, and the creation time and date."
+            type: String
+          Tier: 
+            default: "Web Server"
+            description: "(Required) The server tier name of the instance. Used for AMI name"
+            type: String
+        mainSteps:
+        - 
+          action: "aws:createImage"
+          inputs: 
+            ImageDescription: "Pre-Patching AMI"
+            ImageName: "{{ TargetAmiName }}"
+            InstanceId: "{{ InstanceId }}"
+            NoReboot: true
+          maxAttempts: 3
+          name: CreateImage
+          onFailure: Abort
+        - 
+          action: "aws:runCommand"
+          inputs: 
+            DocumentName: AWS-RunPowerShellScript
+            InstanceIds: 
+              - "{{InstanceId}}"
+            Parameters: 
+              commands: "{{PreUpdateScript}}"
+          maxAttempts: 3
+          name: RunPreUpdateScript
+          onFailure: Abort
+          timeoutSeconds: 60
+        -
+          action: "aws:runCommand"
+          inputs: 
+            DocumentName: AWS-UpdateSSMAgent
+            InstanceIds: 
+              - "{{ InstanceId}}"
+            Parameters: 
+              allowDowngrade: "false"
+          maxAttempts: 3
+          name: UpdateSSMAgent
+          onFailure: Abort
+          timeoutSeconds: 630
+        -
+          name: InstallWindowsUpdates
+          action: "aws:runCommand"
+          maxAttempts: 3
+          onFailure: Abort
+          timeoutSeconds: 9000
+          inputs: 
+            DocumentName: "AWS-InstallWindowsUpdates"
+            InstanceIds:
+              - "{{InstanceId}}"
+            Parameters: 
+              Action: Install
+              IncludeKbs: "{{ IncludeKbs }}"
+              ExcludeKbs: "{{ ExcludeKbs }}"
+              Categories: "{{ Categories }}"
+              SeverityLevels: "{{ SeverityLevels }}"
+              PublishedDaysOld: "{{ PublishedDaysOld }}"
+              PublishedDateAfter: "{{ PublishedDateAfter }}"
+              PublishedDateBefore: "{{ PublishedDateBefore }}"
+        -
+          name: InstallMoreWindowsUpdates
+          action: "aws:runCommand"
+          maxAttempts: 3
+          onFailure: Continue
+          timeoutSeconds: 3600
+          inputs: 
+            DocumentName: "AWS-InstallWindowsUpdates"
+            InstanceIds: 
+              - "{{InstanceId}}"
+            Parameters: 
+              Action: Install
+              IncludeKbs: "{{ IncludeKbs }}"
+              ExcludeKbs: "{{ ExcludeKbs }}"
+              Categories: "{{ Categories }}"
+              SeverityLevels: "{{ SeverityLevels }}"
+              PublishedDaysOld: "{{ PublishedDaysOld }}"
+              PublishedDateAfter: "{{ PublishedDateAfter }}"
+              PublishedDateBefore: "{{ PublishedDateBefore }}"
+        -
+          name: RunPostUpdateScript
+          action: "aws:runCommand"
+          maxAttempts: 3
+          onFailure: Abort
+          timeoutSeconds: 30
+          inputs: 
+            DocumentName: "AWS-RunPowerShellScript"
+            InstanceIds: 
+              - "{{InstanceId}}"
+            Parameters: 
+              commands: "{{ PostUpdateScript }}"
+        outputs: ["CreateImage.ImageId"]
+
+

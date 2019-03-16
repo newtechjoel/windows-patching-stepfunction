@@ -1,0 +1,14 @@
+## An example JSON statement to be passed into the step function to target a solution for patching.
+## Patches instances via SSM automation, identifies instance via instancedata tag
+## Will sequentially patch instances based on instance role, "data" database and file servers first, "other" application servers last. Splits patching order into A/B datacenters.
+## https://github.com/newtechjoel
+
+{
+  "patchinginfo": {
+    "solution": "ClientA",
+    "environment": "production",
+    "nextZone": "Step 1 Data Instances A",
+    "retryCounter": 1,
+    "region": "us-east-1"
+  }
+}

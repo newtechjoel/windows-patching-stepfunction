@@ -1,0 +1,435 @@
+{
+            "Comment": "Esri Data and Application Instance Patching",
+            "StartAt": "Data_AZ_A",
+            "States": {
+              "Job_Failed": {
+                "Type": "Fail",
+                "Cause": "Patching step function FAILED",
+                "Error": "Patching step function FAILED"
+              },
+              "Data_AZ_A": {
+                "Type": "Task",
+                "Resource": "${ssmPatchingArn}",
+                "ResultPath": "$",
+                "Retry": [ {
+                    "ErrorEquals": [ "Lambda.ServiceException", "Lambda.SdkClientException", "States.TaskFailed"],
+                    "IntervalSeconds": 5,
+                    "MaxAttempts": 3,
+                    "BackoffRate": 2
+                } ],
+                "Next": "Get_Status_Data_AZ_A"
+              },
+              "Get_Status_Data_AZ_A": {
+                "Type": "Task",
+                "Resource": "${ssmPollingArn}",
+                "InputPath": "$",
+                "Next": "Confirm_Data_AZ_A",
+                "Retry": [ {
+                    "ErrorEquals": [ "Lambda.ServiceException", "Lambda.SdkClientException", "States.TaskFailed"],
+                    "IntervalSeconds": 5,
+                    "MaxAttempts": 3,
+                    "BackoffRate": 2
+                } ],
+                "ResultPath": "$"
+              },
+              "Failure_Notification": {
+                "Type": "Task",
+                "Resource": "${ssmNotificationFunction}",
+                "InputPath": "$",
+                "Retry": [ {
+                    "ErrorEquals": [ "Lambda.ServiceException", "Lambda.SdkClientException", "States.TaskFailed"],
+                    "IntervalSeconds": 5,
+                    "MaxAttempts": 3,
+                    "BackoffRate": 2
+                } ],
+                "Next": "Job_Failed",
+                "ResultPath": "$"
+              },
+              "Single_Automation_Failure_Notification_DATA_A": {
+                "Type": "Task",
+                "Resource": "${ssmNotificationFunction}",
+                "InputPath": "$",
+                "Retry": [ {
+                    "ErrorEquals": [ "Lambda.ServiceException", "Lambda.SdkClientException", "States.TaskFailed"],
+                    "IntervalSeconds": 5,
+                    "MaxAttempts": 3,
+                    "BackoffRate": 2
+                } ],
+                "Next": "Retry_Automation_DATA_A",
+                "ResultPath": "$"
+              },
+              "Wait_3m_Data_A": {
+                "Type": "Wait",
+                "Seconds": 180,
+                "Next": "Get_Status_Data_AZ_A"
+              },
+              "Retry_Automation_DATA_A": {
+                "Type": "Task",
+                "Resource": "${ssmErrorHandlingArn}",
+                "InputPath": "$",
+                "Retry": [ {
+                    "ErrorEquals": [ "Lambda.ServiceException", "Lambda.SdkClientException", "States.TaskFailed"],
+                    "IntervalSeconds": 5,
+                    "MaxAttempts": 3,
+                    "BackoffRate": 2
+                } ],
+                "Next": "Get_Status_Data_AZ_A",
+                "ResultPath": "$"
+              },
+              "Confirm_Data_AZ_A": {
+              "Type": "Choice",
+              "Choices": [
+                {
+                  "And": [
+                    {
+                      "Variable": "$.patchinginfo.status",
+                      "StringEquals": "FAILED"
+                    },
+                    {
+                      "Variable": "$.patchinginfo.retryCounter",
+                      "NumericLessThan": 3
+                    }
+                  ],
+                  "Next": "Single_Automation_Failure_Notification_DATA_A"
+                },
+                {
+                  "And": [
+                    {
+                      "Variable": "$.patchinginfo.status",
+                      "StringEquals": "FAILED"
+                    },
+                    {
+                      "Variable": "$.patchinginfo.retryCounter",
+                      "NumericGreaterThanEquals": 3
+                    }
+                  ],
+                  "Next": "Failure_Notification"
+                },
+                {
+                  "Variable": "$.patchinginfo.status",
+                  "StringEquals": "WAITING",
+                  "Next": "Wait_3m_Data_A"
+                },
+                {
+                  "Variable": "$.patchinginfo.status",
+                  "StringEquals": "SUCCEEDED",
+                  "Next": "Data_AZ_B"
+                }
+              ],
+              "Default": "Wait_3m_Data_A"
+            },
+            "Data_AZ_B": {
+              "Type": "Task",
+              "InputPath": "$",
+              "Resource": "${ssmPatchingArn}",
+              "ResultPath": "$",
+              "Retry": [ {
+                "ErrorEquals": [ "Lambda.ServiceException", "Lambda.SdkClientException", "States.TaskFailed"],
+                "IntervalSeconds": 5,
+                "MaxAttempts": 3,
+                "BackoffRate": 2
+            } ],
+              "Next": "Get_Status_Data_AZ_B"
+            },
+            "Get_Status_Data_AZ_B": {
+              "Type": "Task",
+              "Resource": "${ssmPollingArn}",
+              "InputPath": "$",
+              "Retry": [ {
+                "ErrorEquals": [ "Lambda.ServiceException", "Lambda.SdkClientException", "States.TaskFailed"],
+                "IntervalSeconds": 5,
+                "MaxAttempts": 3,
+                "BackoffRate": 2
+            } ],
+              "Next": "Confirm_Data_AZ_B",
+              "ResultPath": "$"
+            },
+            "Wait_3m_Data_B": {
+              "Type": "Wait",
+              "Seconds": 180,
+              "Next": "Get_Status_Data_AZ_B"
+            },
+            "Single_Automation_Failure_Notification_DATA_B": {
+                "Type": "Task",
+                "Resource": "${ssmNotificationFunction}",
+                "InputPath": "$",
+                "Retry": [ {
+                    "ErrorEquals": [ "Lambda.ServiceException", "Lambda.SdkClientException", "States.TaskFailed"],
+                    "IntervalSeconds": 5,
+                    "MaxAttempts": 3,
+                    "BackoffRate": 2
+                } ],
+                "Next": "Retry_Automation_DATA_B",
+                "ResultPath": "$"
+              },
+            "Retry_Automation_DATA_B": {
+                "Type": "Task",
+                "Resource": "${ssmErrorHandlingArn}",
+                "InputPath": "$",
+                "Retry": [ {
+                    "ErrorEquals": [ "Lambda.ServiceException", "Lambda.SdkClientException", "States.TaskFailed"],
+                    "IntervalSeconds": 5,
+                    "MaxAttempts": 3,
+                    "BackoffRate": 2
+                } ],
+                "Next": "Get_Status_Data_AZ_B",
+                "ResultPath": "$"
+              },
+            "Confirm_Data_AZ_B": {
+                "Type": "Choice",
+                "Choices": [
+                  {
+                    "And": [
+                      {
+                        "Variable": "$.patchinginfo.status",
+                        "StringEquals": "FAILED"
+                      },
+                      {
+                        "Variable": "$.patchinginfo.retryCounter",
+                        "NumericLessThan": 3
+                      }
+                    ],
+                    "Next": "Single_Automation_Failure_Notification_DATA_B"
+                  },
+                  {
+                    "And": [
+                      {
+                        "Variable": "$.patchinginfo.status",
+                        "StringEquals": "FAILED"
+                      },
+                      {
+                        "Variable": "$.patchinginfo.retryCounter",
+                        "NumericGreaterThanEquals": 3
+                      }
+                    ],
+                    "Next": "Failure_Notification"
+                  },
+                  {
+                    "Variable": "$.patchinginfo.status",
+                    "StringEquals": "WAITING",
+                    "Next": "Wait_3m_Data_B"
+                  },
+                  {
+                    "Variable": "$.patchinginfo.status",
+                    "StringEquals": "SUCCEEDED",
+                    "Next": "Application_AZ_A"
+                  }
+                ],
+              "Default": "Wait_3m_Data_B"
+            },
+            "Application_AZ_A": {
+              "Type": "Task",
+              "InputPath": "$",
+              "Resource": "${ssmPatchingArn}",
+              "ResultPath": "$",
+              "Retry": [ {
+                "ErrorEquals": [ "Lambda.ServiceException", "Lambda.SdkClientException", "States.TaskFailed"],
+                "IntervalSeconds": 5,
+                "MaxAttempts": 3,
+                "BackoffRate": 2
+            } ],
+              "Next": "Get_Status_Application_AZ_A"
+            },
+            "Get_Status_Application_AZ_A": {
+              "Type": "Task",
+              "Resource": "${ssmPollingArn}",
+              "InputPath": "$",
+              "Retry": [ {
+                "ErrorEquals": [ "Lambda.ServiceException", "Lambda.SdkClientException", "States.TaskFailed"],
+                "IntervalSeconds": 5,
+                "MaxAttempts": 3,
+                "BackoffRate": 2
+            } ],
+              "Next": "Confirm_Application_AZ_A",
+              "ResultPath": "$"
+            },
+            "Wait_3m_Application_A": {
+              "Type": "Wait",
+              "Seconds": 180,
+              "Next": "Get_Status_Application_AZ_A"
+            },
+            "Single_Automation_Failure_Notification_APPLICATION_A": {
+                "Type": "Task",
+                "Resource": "${ssmNotificationFunction}",
+                "InputPath": "$",
+                "Retry": [ {
+                    "ErrorEquals": [ "Lambda.ServiceException", "Lambda.SdkClientException", "States.TaskFailed"],
+                    "IntervalSeconds": 5,
+                    "MaxAttempts": 3,
+                    "BackoffRate": 2
+                } ],
+                "Next": "Retry_Automation_APPLICATION_A",
+                "ResultPath": "$"
+              },
+            "Retry_Automation_APPLICATION_A": {
+                "Type": "Task",
+                "Resource": "${ssmErrorHandlingArn}",
+                "InputPath": "$",
+                "Retry": [ {
+                    "ErrorEquals": [ "Lambda.ServiceException", "Lambda.SdkClientException", "States.TaskFailed"],
+                    "IntervalSeconds": 5,
+                    "MaxAttempts": 3,
+                    "BackoffRate": 2
+                } ],
+                "Next": "Get_Status_Application_AZ_A",
+                "ResultPath": "$"
+              },
+            "Confirm_Application_AZ_A": {
+                "Type": "Choice",
+                "Choices": [
+                  {
+                    "And": [
+                      {
+                        "Variable": "$.patchinginfo.status",
+                        "StringEquals": "FAILED"
+                      },
+                      {
+                        "Variable": "$.patchinginfo.retryCounter",
+                        "NumericLessThan": 3
+                      }
+                    ],
+                    "Next": "Single_Automation_Failure_Notification_APPLICATION_A"
+                  },
+                  {
+                    "And": [
+                      {
+                        "Variable": "$.patchinginfo.status",
+                        "StringEquals": "FAILED"
+                      },
+                      {
+                        "Variable": "$.patchinginfo.retryCounter",
+                        "NumericGreaterThanEquals": 3
+                      }
+                    ],
+                    "Next": "Failure_Notification"
+                  },
+                  {
+                    "Variable": "$.patchinginfo.status",
+                    "StringEquals": "WAITING",
+                    "Next": "Wait_3m_Application_A"
+                  },
+                  {
+                    "Variable": "$.patchinginfo.status",
+                    "StringEquals": "SUCCEEDED",
+                    "Next": "Application_AZ_B"
+                  }
+                ],
+              "Default": "Wait_3m_Application_A"
+            },
+            "Application_AZ_B": {
+              "Type": "Task",
+              "InputPath": "$",
+              "Resource": "${ssmPatchingArn}",
+              "ResultPath": "$",
+              "Retry": [ {
+                "ErrorEquals": [ "Lambda.ServiceException", "Lambda.SdkClientException", "States.TaskFailed"],
+                "IntervalSeconds": 5,
+                "MaxAttempts": 3,
+                "BackoffRate": 2
+            } ],
+              "Next": "Get_Status_Application_AZ_B"
+            },
+            "Get_Status_Application_AZ_B": {
+              "Type": "Task",
+              "Resource": "${ssmPollingArn}",
+              "InputPath": "$",
+              "Retry": [ {
+                "ErrorEquals": [ "Lambda.ServiceException", "Lambda.SdkClientException", "States.TaskFailed"],
+                "IntervalSeconds": 5,
+                "MaxAttempts": 3,
+                "BackoffRate": 2
+            } ],
+              "Next": "Confirm_Application_AZ_B",
+              "ResultPath": "$"
+            },
+            "Wait_3m_Application_B": {
+              "Type": "Wait",
+              "Seconds": 180,
+              "Next": "Get_Status_Application_AZ_B"
+            },
+            "Single_Automation_Failure_Notification_APPLICATION_B": {
+                "Type": "Task",
+                "Resource": "${ssmNotificationFunction}",
+                "InputPath": "$",
+                "Retry": [ {
+                    "ErrorEquals": [ "Lambda.ServiceException", "Lambda.SdkClientException", "States.TaskFailed"],
+                    "IntervalSeconds": 5,
+                    "MaxAttempts": 3,
+                    "BackoffRate": 2
+                } ],
+                "Next": "Retry_Automation_APPLICATION_B",
+                "ResultPath": "$"
+              },
+            "Retry_Automation_APPLICATION_B": {
+                "Type": "Task",
+                "Resource": "${ssmErrorHandlingArn}",
+                "InputPath": "$",
+                "Retry": [ {
+                    "ErrorEquals": [ "Lambda.ServiceException", "Lambda.SdkClientException", "States.TaskFailed"],
+                    "IntervalSeconds": 5,
+                    "MaxAttempts": 3,
+                    "BackoffRate": 2
+                } ],
+                "Next": "Get_Status_Application_AZ_B",
+                "ResultPath": "$"
+              },
+            "Confirm_Application_AZ_B": {
+                "Type": "Choice",
+                "Choices": [
+                  {
+                    "And": [
+                      {
+                        "Variable": "$.patchinginfo.status",
+                        "StringEquals": "FAILED"
+                      },
+                      {
+                        "Variable": "$.patchinginfo.retryCounter",
+                        "NumericLessThan": 3
+                      }
+                    ],
+                    "Next": "Single_Automation_Failure_Notification_APPLICATION_B"
+                  },
+                  {
+                    "And": [
+                      {
+                        "Variable": "$.patchinginfo.status",
+                        "StringEquals": "FAILED"
+                      },
+                      {
+                        "Variable": "$.patchinginfo.retryCounter",
+                        "NumericGreaterThanEquals": 3
+                      }
+                    ],
+                    "Next": "Failure_Notification"
+                  },
+                  {
+                    "Variable": "$.patchinginfo.status",
+                    "StringEquals": "WAITING",
+                    "Next": "Wait_3m_Application_B"
+                  },
+                  {
+                    "Variable": "$.patchinginfo.status",
+                    "StringEquals": "SUCCEEDED",
+                    "Next": "Success_Notification"
+                  }
+                ],
+              "Default": "Wait_3m_Application_B"
+            },
+            "Success_Notification": {
+              "Type": "Task",
+              "Resource": "${ssmNotificationFunction}",
+              "InputPath": "$",
+              "Next": "End Patching",
+              "Retry": [ {
+                "ErrorEquals": [ "Lambda.ServiceException", "Lambda.SdkClientException", "States.TaskFailed"],
+                "IntervalSeconds": 5,
+                "MaxAttempts": 3,
+                "BackoffRate": 2
+            } ],
+              "ResultPath": "$"
+            },
+            "End Patching": {
+              "Type": "Succeed"
+                }
+              }
+          }
