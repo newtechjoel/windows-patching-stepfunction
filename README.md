@@ -10,10 +10,10 @@ AWS step function and associated Lambda functions to patch Windows servers by en
 - Email on completion or failure.
 
 ## Installation Notes
-- Download files 
+- Download all files. 
 - Upload zips to S3 bucket, please place zips in root of bucket.
 - Run deployment.yml and specify bucket name and contactTo and contactFrom email identities. Please note, the bucket must be in same region as Lambda functions.
-- If using new contactTo and contactFrom email addresses, Please ensure you verify the SES US East 1 contactTo and contactFrom email addresses! The ssm_patchingnotfications will create the SES email identity but cannot verify.
+- If using new contactTo and contactFrom email addresses that have not been verified, please ensure you verify the SES US East 1, contactTo and contactFrom email addresses! The ssm_patchingnotfications will create the SES email identities but cannot verify.
 
 ## General information
 Includes the following artifacts
@@ -54,7 +54,7 @@ The Step Function will take the following JSON as input. Please customise this w
   }
 }
 
-Pass in the relevant values that match the instancedata tag.
+Replace relevant values that match the instancedata tag for the solution you are patching.
 
 
 
