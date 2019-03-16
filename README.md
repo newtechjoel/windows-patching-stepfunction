@@ -37,7 +37,7 @@ This allows for filtering of different environment and solutions within the same
 - Windows Server
 - Web Server
 
-So for example, a development SQL Server would be tagged Key: instancedata Value: {"solution":"ClientA","environment":"production","instance":"SQL Server"}
+So for example, a development SQL Server would be tagged Key: instancedata Value: {"solution":"ClientA","environment":"development","instance":"SQL Server"}
 
 More strings can be added as per requirements. **The strings are case sensitive**
 
@@ -53,6 +53,8 @@ The Step Function will take the following JSON as input. Please customise this w
     "region": "us-east-1"
   }
 }
+
+The above is case sensitive and must match the tag.
 
 Replace relevant values that match the instancedata tag for the solution you are patching.
 
